@@ -419,64 +419,6 @@ export async function startBot() {
     ),
   );
 
-  // ══════════════════════════════════════════════════════════════════════════
-  //  /users — المالك فقط
-  // ══════════════════════════════════════════════════════════════════════════
-  bot.command("users", async (ctx) => {
-    if (!ownerId || String(ctx.from?.id) !== ownerId) return;
-
-    const users = await db
-      .select()
-      .from(telegramUsersTable)
-      .orderBy(sql`${telegramUsersTable.lastSeenAt} desc`);
-
-    if (users.length === 0) return ctx.reply("لا يوجد مستخدمين بعد.");
-
-    for (const ch of chunk(users, 30)) {
-      const header = ch === users.slice(0, 30)
-        ? `👥 <b>المستخدمين (${users.length})</b>\n\n`
-        : "";
-      const lines = ch.map((u, i) => {
-        const num = users.indexOf(u) + 1;
-        const name = [u.firstName, u.lastName].filter(Boolean).join(" ");
-        const user2 = u.username ? ` (@${u.username})` : "";
-        return `${num}. <a href="tg://user?id=${u.telegramId}">${name}</a>${user2}\n🆔 <code>${u.telegramId}</code> | 💬 ${u.messageCount}`;
-      });
-      await ctx.reply(header + lines.join("\n\n"), { parse_mode: "HTML" });
-    }
-  });
-
-  // ══════════════════════════════════════════════════════════════════════════
-  //  /stats — المالك فقط
-  // ══════════════════════════════════════════════════════════════════════════
-  bot.command("stats", async (ctx) => {
-    if (!ownerId || String(ctx.from?.id) !== ownerId) return;
-
-    const [{ total }] = await db
-      .select({ total: sql<number>`count(*)` })
-      .from(telegramUsersTable);
-
-    const [{ msgs }] = await db
-      .select({ msgs: sql<number>`coalesce(sum(message_count),0)` })
-      .from(telegramUsersTable);
-
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-
-    const [{ newToday }] = await db
-      .select({ newToday: sql<number>`count(*)` })
-      .from(telegramUsersTable)
-      .where(sql`first_seen_at >= ${todayStart}`);
-
-    return ctx.reply(
-      `📊 <b>إحصائيات البوت</b>\n\n` +
-        `👥 إجمالي المستخدمين: <b>${total}</b>\n` +
-        `💬 إجمالي الرسائل: <b>${msgs}</b>\n` +
-        `🆕 مستخدمين جدد اليوم: <b>${newToday}</b>`,
-      { parse_mode: "HTML" },
-    );
-  });
-
   // ─────────────────────────────────────────────────────────────────────────
   bot.catch((err) => logger.error({ err }, "Bot error"));
 
