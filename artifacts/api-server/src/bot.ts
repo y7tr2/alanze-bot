@@ -4,6 +4,33 @@ import { telegramUsersTable } from "@workspace/db/schema";
 import { sql } from "drizzle-orm";
 import { logger } from "./lib/logger";
 
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+async function safeFetch(url: string, opts?: RequestInit) {
+  try {
+    const res = await fetch(url, {
+      ...opts,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; AlanzBot/1.0)",
+        ...(opts?.headers ?? {}),
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+    return res;
+  } catch {
+    return null;
+  }
+}
+
+// ─── bot setup ───────────────────────────────────────────────────────────────
+
 export async function startBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const ownerId = process.env.TELEGRAM_OWNER_ID;
@@ -13,17 +40,12 @@ export async function startBot() {
     return;
   }
 
-  if (!ownerId) {
-    logger.warn("TELEGRAM_OWNER_ID not set — owner commands disabled");
-  }
-
   const bot = new Bot(token);
 
-  // Track every user who sends a message
+  // ── track every user ──────────────────────────────────────────────────────
   bot.on("message", async (ctx) => {
     const from = ctx.from;
     if (!from) return;
-
     try {
       await db
         .insert(telegramUsersTable)
@@ -49,59 +71,415 @@ export async function startBot() {
     }
   });
 
-  // /users — owner only
-  bot.command("users", async (ctx) => {
-    const senderId = String(ctx.from?.id);
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /start
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("start", (ctx) => {
+    const name = ctx.from?.first_name ?? "زائر";
+    return ctx.reply(
+      `أهلاً ${name}! 👋\n\nاكتب /help لعرض جميع الأوامر المتاحة.`,
+    );
+  });
 
-    if (!ownerId || senderId !== ownerId) {
-      return; // silently ignore non-owners
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /help
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("help", (ctx) =>
+    ctx.reply(
+      `📋 <b>الأوامر المتاحة</b>\n\n` +
+        `👤 <b>معلومات شخصية</b>\n` +
+        `/myinfo — معلومات حسابك في تيليقرام\n` +
+        `/id — عرض الآيدي (رد على رسالة شخص)\n\n` +
+        `🌐 <b>معلومات الإنترنت</b>\n` +
+        `/siteinfo [رابط] — معلومات عن موقع\n` +
+        `/ping — اختبار سرعة البوت\n\n` +
+        `📱 <b>حسابات التواصل</b>\n` +
+        `/tiktokinfo [يوزر] — معلومات حساب تيك توك\n` +
+        `/iginfo [يوزر] — معلومات حساب انستقرام\n` +
+        `/twitterinfo [يوزر] — معلومات حساب تويتر/X\n\n` +
+        `🔧 <b>أدوات</b>\n` +
+        `/encode [نص] — تحويل نص إلى Base64\n` +
+        `/decode [نص] — فك تشفير Base64\n` +
+        `/camera — روابط أدوات التصوير\n` +
+        `/tools — أدوات مفيدة\n\n` +
+        `/start — بداية البوت`,
+      { parse_mode: "HTML" },
+    ),
+  );
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /myinfo — معلومات المستخدم نفسه
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("myinfo", async (ctx) => {
+    const u = ctx.from;
+    if (!u) return;
+    const username = u.username ? `@${u.username}` : "—";
+    const lang = u.language_code ?? "—";
+    const name = [u.first_name, u.last_name].filter(Boolean).join(" ");
+    return ctx.reply(
+      `👤 <b>معلوماتك</b>\n\n` +
+        `🆔 الآيدي: <code>${u.id}</code>\n` +
+        `📛 الاسم: ${name}\n` +
+        `👤 اليوزر: ${username}\n` +
+        `🌍 اللغة: ${lang}\n` +
+        `🔗 الرابط: <a href="tg://user?id=${u.id}">افتح الملف الشخصي</a>`,
+      { parse_mode: "HTML" },
+    );
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /id — آيدي شخص عبر الرد
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("id", (ctx) => {
+    const reply = ctx.message?.reply_to_message;
+    if (reply?.from) {
+      const u = reply.from;
+      const name = [u.first_name, u.last_name].filter(Boolean).join(" ");
+      return ctx.reply(
+        `🆔 آيدي <b>${name}</b>: <code>${u.id}</code>`,
+        { parse_mode: "HTML" },
+      );
+    }
+    // no reply → show self
+    const u = ctx.from!;
+    return ctx.reply(`🆔 آيديك: <code>${u.id}</code>`, { parse_mode: "HTML" });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /ping
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("ping", async (ctx) => {
+    const start = Date.now();
+    const msg = await ctx.reply("🏓 جاري القياس...");
+    const ms = Date.now() - start;
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      msg.message_id,
+      `🏓 Pong! السرعة: <b>${ms}ms</b>`,
+      { parse_mode: "HTML" },
+    );
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /siteinfo [url] — معلومات عن موقع
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("siteinfo", async (ctx) => {
+    const input = ctx.match?.trim();
+    if (!input) {
+      return ctx.reply("📌 الاستخدام: /siteinfo [رابط الموقع]\nمثال: /siteinfo google.com");
     }
 
+    const url = input.startsWith("http") ? input : `https://${input}`;
+    await ctx.reply("🔍 جاري جلب معلومات الموقع...");
+
+    const res = await safeFetch(url);
+    if (!res) {
+      return ctx.reply("❌ تعذّر الوصول إلى الموقع أو الرابط غلط.");
+    }
+
+    // try to extract <title>
+    let title = "—";
     try {
-      const users = await db
-        .select()
-        .from(telegramUsersTable)
-        .orderBy(sql`${telegramUsersTable.lastSeenAt} desc`);
+      const html = await res.text();
+      const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (match) title = match[1].trim().slice(0, 80);
+    } catch { /* ignore */ }
 
-      if (users.length === 0) {
-        await ctx.reply("لا يوجد مستخدمين بعد.");
-        return;
-      }
+    const statusEmoji = res.status < 300 ? "✅" : res.status < 400 ? "🔀" : "❌";
+    const server = res.headers.get("server") ?? "—";
+    const contentType = res.headers.get("content-type")?.split(";")[0] ?? "—";
 
-      // Send in chunks of 30 to avoid message length limits
-      const chunkSize = 30;
-      for (let i = 0; i < users.length; i += chunkSize) {
-        const chunk = users.slice(i, i + chunkSize);
-        const lines = chunk.map((u, index) => {
-          const num = i + index + 1;
-          const name = [u.firstName, u.lastName].filter(Boolean).join(" ");
-          const username = u.username ? ` (@${u.username})` : "";
-          const link = u.username
-            ? `<a href="tg://user?id=${u.telegramId}">${name}</a>`
-            : `<a href="tg://user?id=${u.telegramId}">${name}</a>`;
-          return `${num}. ${link}${username}\n🆔 <code>${u.telegramId}</code> | 💬 ${u.messageCount} رسالة`;
-        });
+    return ctx.reply(
+      `🌐 <b>معلومات الموقع</b>\n\n` +
+        `🔗 الرابط: <code>${url}</code>\n` +
+        `${statusEmoji} الحالة: <b>${res.status} ${res.statusText}</b>\n` +
+        `📄 العنوان: ${title}\n` +
+        `🖥 السيرفر: ${server}\n` +
+        `📦 النوع: ${contentType}`,
+      { parse_mode: "HTML" },
+    );
+  });
 
-        const header =
-          i === 0
-            ? `👥 <b>المستخدمين (${users.length})</b>\n\n`
-            : "";
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /tiktokinfo [username] — معلومات حساب تيك توك
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("tiktokinfo", async (ctx) => {
+    let username = ctx.match?.trim().replace(/^@/, "");
+    if (!username) {
+      return ctx.reply("📌 الاستخدام: /tiktokinfo [يوزر]\nمثال: /tiktokinfo khaby.lame");
+    }
 
-        await ctx.reply(header + lines.join("\n\n"), {
-          parse_mode: "HTML",
-        });
-      }
-    } catch (err) {
-      logger.error({ err }, "Failed to fetch users for owner command");
-      await ctx.reply("حدث خطأ أثناء جلب البيانات.");
+    await ctx.reply("🎵 جاري جلب معلومات الحساب...");
+
+    // TikTok oEmbed API (public, no auth needed)
+    const res = await safeFetch(
+      `https://www.tiktok.com/oembed?url=https://www.tiktok.com/@${username}`,
+    );
+
+    if (!res || !res.ok) {
+      return ctx.reply("❌ الحساب غير موجود أو تعذّر جلب المعلومات.");
+    }
+
+    let data: Record<string, unknown>;
+    try {
+      data = (await res.json()) as Record<string, unknown>;
+    } catch {
+      return ctx.reply("❌ تعذّر قراءة البيانات.");
+    }
+
+    const authorName = (data.author_name as string) ?? username;
+    const authorUrl = (data.author_url as string) ?? `https://tiktok.com/@${username}`;
+    const thumbUrl = (data.thumbnail_url as string) ?? null;
+
+    let reply =
+      `🎵 <b>معلومات حساب تيك توك</b>\n\n` +
+      `👤 الاسم: <b>${authorName}</b>\n` +
+      `🔗 الرابط: ${authorUrl}`;
+
+    if (thumbUrl) {
+      // send photo + caption
+      return ctx.replyWithPhoto(thumbUrl, {
+        caption: reply,
+        parse_mode: "HTML",
+      });
+    }
+
+    return ctx.reply(reply, { parse_mode: "HTML" });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /iginfo [username] — معلومات انستقرام (عام)
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("iginfo", async (ctx) => {
+    let username = ctx.match?.trim().replace(/^@/, "");
+    if (!username) {
+      return ctx.reply("📌 الاستخدام: /iginfo [يوزر]\nمثال: /iginfo cristiano");
+    }
+
+    await ctx.reply("📸 جاري جلب معلومات الحساب...");
+
+    const res = await safeFetch(
+      `https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`,
+      { headers: { "x-ig-app-id": "936619743392459" } },
+    );
+
+    if (!res || !res.ok) {
+      return ctx.reply(
+        `❌ تعذّر جلب المعلومات.\n\n🔗 تقدر تشوف الحساب مباشرة:\nhttps://instagram.com/${username}`,
+      );
+    }
+
+    let json: Record<string, unknown>;
+    try { json = await res.json() as Record<string, unknown>; }
+    catch { return ctx.reply("❌ تعذّر قراءة البيانات."); }
+
+    const user = (json as { data?: { user?: Record<string, unknown> } }).data?.user;
+    if (!user) {
+      return ctx.reply(
+        `❌ الحساب غير موجود.\n🔗 https://instagram.com/${username}`,
+      );
+    }
+
+    const fullName = (user.full_name as string) || "—";
+    const bio = (user.biography as string) || "—";
+    const followers = ((user.edge_followed_by as { count?: number })?.count ?? 0).toLocaleString("ar");
+    const following = ((user.edge_follow as { count?: number })?.count ?? 0).toLocaleString("ar");
+    const posts = ((user.edge_owner_to_timeline_media as { count?: number })?.count ?? 0).toLocaleString("ar");
+    const isPrivate = (user.is_private as boolean) ? "🔒 خاص" : "🌍 عام";
+    const isVerified = (user.is_verified as boolean) ? " ✅" : "";
+    const pic = (user.profile_pic_url_hd as string) || (user.profile_pic_url as string);
+
+    const caption =
+      `📸 <b>${fullName}${isVerified}</b> (@${username})\n\n` +
+      `${isPrivate}\n` +
+      `👥 المتابعون: <b>${followers}</b>\n` +
+      `➡️ يتابع: <b>${following}</b>\n` +
+      `📷 المنشورات: <b>${posts}</b>\n` +
+      `📝 السيرة: ${bio.slice(0, 150)}\n\n` +
+      `🔗 https://instagram.com/${username}`;
+
+    if (pic) {
+      return ctx.replyWithPhoto(pic, { caption, parse_mode: "HTML" });
+    }
+    return ctx.reply(caption, { parse_mode: "HTML" });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /twitterinfo [username]
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("twitterinfo", async (ctx) => {
+    let username = ctx.match?.trim().replace(/^@/, "");
+    if (!username) {
+      return ctx.reply("📌 الاستخدام: /twitterinfo [يوزر]\nمثال: /twitterinfo elonmusk");
+    }
+
+    // Twitter/X public nitter fallback
+    await ctx.reply("🐦 جاري البحث...");
+
+    const res = await safeFetch(`https://api.twitter.com/2/users/by/username/${username}?user.fields=name,description,public_metrics,verified,profile_image_url`, {
+      headers: { Authorization: `Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA` }
+    });
+
+    if (!res || !res.ok) {
+      return ctx.reply(
+        `❌ تعذّر جلب المعلومات.\n🔗 تقدر تشوف الحساب:\nhttps://x.com/${username}`,
+      );
+    }
+
+    let json: { data?: { name?: string; description?: string; public_metrics?: { followers_count?: number; following_count?: number; tweet_count?: number }; verified?: boolean; profile_image_url?: string } };
+    try { json = await res.json(); } catch { return ctx.reply("❌ تعذّر قراءة البيانات."); }
+
+    const u = json.data;
+    if (!u) return ctx.reply(`❌ الحساب غير موجود.\n🔗 https://x.com/${username}`);
+
+    const m = u.public_metrics ?? {};
+    const caption =
+      `🐦 <b>${u.name ?? username}</b> (@${username})\n\n` +
+      `👥 المتابعون: <b>${(m.followers_count ?? 0).toLocaleString("ar")}</b>\n` +
+      `➡️ يتابع: <b>${(m.following_count ?? 0).toLocaleString("ar")}</b>\n` +
+      `📝 التغريدات: <b>${(m.tweet_count ?? 0).toLocaleString("ar")}</b>\n` +
+      `📄 Bio: ${(u.description ?? "—").slice(0, 150)}\n\n` +
+      `🔗 https://x.com/${username}`;
+
+    const pic = u.profile_image_url?.replace("_normal", "_400x400");
+    if (pic) return ctx.replyWithPhoto(pic, { caption, parse_mode: "HTML" });
+    return ctx.reply(caption, { parse_mode: "HTML" });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /encode — تشفير Base64
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("encode", (ctx) => {
+    const text = ctx.match?.trim();
+    if (!text) return ctx.reply("📌 الاستخدام: /encode [النص]");
+    const encoded = Buffer.from(text, "utf8").toString("base64");
+    return ctx.reply(
+      `🔐 <b>النص المشفّر (Base64)</b>\n<code>${encoded}</code>`,
+      { parse_mode: "HTML" },
+    );
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /decode — فك التشفير
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("decode", (ctx) => {
+    const text = ctx.match?.trim();
+    if (!text) return ctx.reply("📌 الاستخدام: /decode [النص المشفّر]");
+    try {
+      const decoded = Buffer.from(text, "base64").toString("utf8");
+      return ctx.reply(
+        `🔓 <b>النص الأصلي</b>\n<code>${decoded}</code>`,
+        { parse_mode: "HTML" },
+      );
+    } catch {
+      return ctx.reply("❌ النص ليس Base64 صحيح.");
     }
   });
 
-  bot.catch((err) => {
-    logger.error({ err }, "Bot error");
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /camera — روابط أدوات التصوير
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("camera", (ctx) =>
+    ctx.reply(
+      `📷 <b>أدوات وروابط التصوير</b>\n\n` +
+        `🎨 <b>تحرير الصور</b>\n` +
+        `• <a href="https://www.canva.com">Canva</a> — تصميم وتحرير سهل\n` +
+        `• <a href="https://lightroom.adobe.com">Adobe Lightroom</a> — تحرير احترافي\n` +
+        `• <a href="https://www.remove.bg">Remove.bg</a> — حذف الخلفية\n` +
+        `• <a href="https://squoosh.app">Squoosh</a> — ضغط الصور\n\n` +
+        `🎬 <b>تحرير الفيديو</b>\n` +
+        `• <a href="https://www.capcut.com">CapCut</a> — تحرير سريع\n` +
+        `• <a href="https://clideo.com">Clideo</a> — أدوات فيديو أونلاين\n\n` +
+        `🔍 <b>أدوات أخرى</b>\n` +
+        `• <a href="https://exifinfo.org">EXIF Info</a> — معلومات الصورة\n` +
+        `• <a href="https://www.iloveimg.com/ar">iLoveIMG</a> — تحويل وضغط\n` +
+        `• <a href="https://tinypng.com">TinyPNG</a> — ضغط PNG`,
+      { parse_mode: "HTML", disable_web_page_preview: true },
+    ),
+  );
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /tools — أدوات مفيدة عامة
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("tools", (ctx) =>
+    ctx.reply(
+      `🔧 <b>أدوات مفيدة</b>\n\n` +
+        `🌐 <b>إنترنت</b>\n` +
+        `• <a href="https://www.whatismyip.com">What Is My IP</a> — معرفة الـ IP\n` +
+        `• <a href="https://dnschecker.org">DNS Checker</a> — فحص DNS\n` +
+        `• <a href="https://www.ssllabs.com/ssltest">SSL Labs</a> — فحص SSL\n\n` +
+        `🔐 <b>أمان</b>\n` +
+        `• <a href="https://haveibeenpwned.com">HaveIBeenPwned</a> — اختراق البيانات\n` +
+        `• <a href="https://www.virustotal.com">VirusTotal</a> — فحص ملفات وروابط\n\n` +
+        `📊 <b>منوعات</b>\n` +
+        `• <a href="https://temp-mail.org/ar">Temp Mail</a> — إيميل مؤقت\n` +
+        `• <a href="https://10minutemail.com">10 Minute Mail</a> — إيميل سريع\n` +
+        `• <a href="https://www.pastebin.com">Pastebin</a> — مشاركة نصوص`,
+      { parse_mode: "HTML", disable_web_page_preview: true },
+    ),
+  );
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /users — المالك فقط
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("users", async (ctx) => {
+    if (!ownerId || String(ctx.from?.id) !== ownerId) return;
+
+    const users = await db
+      .select()
+      .from(telegramUsersTable)
+      .orderBy(sql`${telegramUsersTable.lastSeenAt} desc`);
+
+    if (users.length === 0) return ctx.reply("لا يوجد مستخدمين بعد.");
+
+    for (const ch of chunk(users, 30)) {
+      const header = ch === users.slice(0, 30)
+        ? `👥 <b>المستخدمين (${users.length})</b>\n\n`
+        : "";
+      const lines = ch.map((u, i) => {
+        const num = users.indexOf(u) + 1;
+        const name = [u.firstName, u.lastName].filter(Boolean).join(" ");
+        const user2 = u.username ? ` (@${u.username})` : "";
+        return `${num}. <a href="tg://user?id=${u.telegramId}">${name}</a>${user2}\n🆔 <code>${u.telegramId}</code> | 💬 ${u.messageCount}`;
+      });
+      await ctx.reply(header + lines.join("\n\n"), { parse_mode: "HTML" });
+    }
   });
 
-  // Run in background — never crash the HTTP server
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /stats — المالك فقط
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("stats", async (ctx) => {
+    if (!ownerId || String(ctx.from?.id) !== ownerId) return;
+
+    const [{ total }] = await db
+      .select({ total: sql<number>`count(*)` })
+      .from(telegramUsersTable);
+
+    const [{ msgs }] = await db
+      .select({ msgs: sql<number>`coalesce(sum(message_count),0)` })
+      .from(telegramUsersTable);
+
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const [{ newToday }] = await db
+      .select({ newToday: sql<number>`count(*)` })
+      .from(telegramUsersTable)
+      .where(sql`first_seen_at >= ${todayStart}`);
+
+    return ctx.reply(
+      `📊 <b>إحصائيات البوت</b>\n\n` +
+        `👥 إجمالي المستخدمين: <b>${total}</b>\n` +
+        `💬 إجمالي الرسائل: <b>${msgs}</b>\n` +
+        `🆕 مستخدمين جدد اليوم: <b>${newToday}</b>`,
+      { parse_mode: "HTML" },
+    );
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  bot.catch((err) => logger.error({ err }, "Bot error"));
+
   bot
     .start({ onStart: () => logger.info("Telegram bot started") })
     .catch((err) => logger.error({ err }, "Bot stopped unexpectedly"));
