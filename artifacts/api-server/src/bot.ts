@@ -1,16 +1,5 @@
 import { Bot } from "grammy";
-import { db } from "@workspace/db";
-import { telegramUsersTable } from "@workspace/db/schema";
-import { sql } from "drizzle-orm";
 import { logger } from "./lib/logger";
-
-// ─── helpers ────────────────────────────────────────────────────────────────
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
 
 async function safeFetch(url: string, opts?: RequestInit) {
   try {
@@ -41,35 +30,6 @@ export async function startBot() {
   }
 
   const bot = new Bot(token);
-
-  // ── track every user ──────────────────────────────────────────────────────
-  bot.on("message", async (ctx) => {
-    const from = ctx.from;
-    if (!from) return;
-    try {
-      await db
-        .insert(telegramUsersTable)
-        .values({
-          telegramId: String(from.id),
-          firstName: from.first_name,
-          lastName: from.last_name ?? null,
-          username: from.username ?? null,
-          messageCount: 1,
-        })
-        .onConflictDoUpdate({
-          target: telegramUsersTable.telegramId,
-          set: {
-            firstName: from.first_name,
-            lastName: from.last_name ?? null,
-            username: from.username ?? null,
-            messageCount: sql`${telegramUsersTable.messageCount} + 1`,
-            lastSeenAt: new Date(),
-          },
-        });
-    } catch (err) {
-      logger.error({ err }, "Failed to save user");
-    }
-  });
 
   // ══════════════════════════════════════════════════════════════════════════
   //  /start
