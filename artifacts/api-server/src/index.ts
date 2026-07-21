@@ -27,4 +27,15 @@ app.listen(port, (err) => {
   startBot().catch((err) => {
     logger.error({ err }, "Failed to start bot");
   });
+
+  // ── self-ping: keep the process alive every 4 minutes ──────────────────
+  const selfUrl = `http://localhost:${port}/`;
+  setInterval(async () => {
+    try {
+      const res = await fetch(selfUrl, { signal: AbortSignal.timeout(5000) });
+      logger.debug({ status: res.status }, "Self-ping OK");
+    } catch (err) {
+      logger.warn({ err }, "Self-ping failed");
+    }
+  }, 4 * 60 * 1000);
 });
