@@ -57,6 +57,9 @@ export async function startBot() {
         `/tiktokinfo [يوزر] — معلومات حساب تيك توك\n` +
         `/iginfo [يوزر] — معلومات حساب انستقرام\n` +
         `/twitterinfo [يوزر] — معلومات حساب تويتر/X\n\n` +
+        `⬇️ <b>تحميل</b>\n` +
+        `/tiktokdl [رابط] — تحميل فيديو تيك توك بدون علامة مائية\n` +
+        `💡 أو أرسل رابط تيك توك مباشرةً بدون أمر\n\n` +
         `🔧 <b>أدوات</b>\n` +
         `/encode [نص] — تحويل نص إلى Base64\n` +
         `/decode [نص] — فك تشفير Base64\n` +
@@ -379,10 +382,110 @@ export async function startBot() {
     ),
   );
 
+  // ══════════════════════════════════════════════════════════════════════════
+  //  /tiktokdl [رابط] — تحميل فيديو تيك توك بدون علامة مائية
+  // ══════════════════════════════════════════════════════════════════════════
+  bot.command("tiktokdl", async (ctx) => {
+    const input = ctx.match?.trim();
+    if (!input) {
+      return ctx.reply(
+        "📌 الاستخدام: /tiktokdl [رابط الفيديو]\nمثال: /tiktokdl https://vt.tiktok.com/xxx\n\nأو أرسل رابط تيك توك مباشرةً بدون أمر.",
+      );
+    }
+    await downloadTikTok(ctx, input);
+  });
+
+  // ── كشف روابط تيك توك في الرسائل العادية ──────────────────────────────
+  bot.on("message:text", async (ctx, next) => {
+    const text = ctx.message.text ?? "";
+    const tiktokRegex =
+      /https?:\/\/((?:vm|vt|www|m)\.)?tiktok\.com\/[^\s]+/i;
+    const match = text.match(tiktokRegex);
+    if (match) {
+      await downloadTikTok(ctx, match[0]);
+      return;
+    }
+    return next();
+  });
+
   // ─────────────────────────────────────────────────────────────────────────
   bot.catch((err) => logger.error({ err }, "Bot error"));
+
+  // امسح أي ويب-هوك قديم قبل بدء الاستطلاع
+  await bot.api.deleteWebhook({ drop_pending_updates: false });
 
   bot
     .start({ onStart: () => logger.info("Telegram bot started") })
     .catch((err) => logger.error({ err }, "Bot stopped unexpectedly"));
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  helper: تحميل فيديو تيك توك
+// ══════════════════════════════════════════════════════════════════════════
+async function downloadTikTok(
+  ctx: { reply: Function; replyWithVideo: Function; chat: { id: number } },
+  url: string,
+) {
+  const waiting = await (ctx as any).reply("⏳ جاري تحميل الفيديو...");
+
+  try {
+    const apiRes = await fetch("https://www.tikwm.com/api/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (compatible; AlanzBot/1.0)",
+      },
+      body: new URLSearchParams({ url, hd: "1" }),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!apiRes.ok) {
+      await (ctx as any).reply("❌ تعذّر الوصول لخدمة التحميل. حاول لاحقاً.");
+      return;
+    }
+
+    const json = (await apiRes.json()) as {
+      code: number;
+      data?: {
+        play?: string;
+        hdplay?: string;
+        wmplay?: string;
+        title?: string;
+        author?: { nickname?: string; unique_id?: string };
+        duration?: number;
+        size?: number;
+      };
+    };
+
+    if (json.code !== 0 || !json.data) {
+      await (ctx as any).reply("❌ الرابط غير صحيح أو الفيديو غير متاح.");
+      return;
+    }
+
+    const d = json.data;
+    const videoUrl = d.hdplay || d.play || d.wmplay;
+    if (!videoUrl) {
+      await (ctx as any).reply("❌ تعذّر استخراج رابط الفيديو.");
+      return;
+    }
+
+    const title = d.title?.slice(0, 200) ?? "";
+    const author = d.author?.nickname ?? d.author?.unique_id ?? "";
+    const duration = d.duration ? `${d.duration}ث` : "";
+    const caption =
+      `🎵 ${title}\n` +
+      (author ? `👤 ${author}\n` : "") +
+      (duration ? `⏱ ${duration}\n` : "") +
+      `\n🔗 <a href="${url}">رابط الفيديو الأصلي</a>`;
+
+    await (ctx as any).replyWithVideo(videoUrl, {
+      caption,
+      parse_mode: "HTML",
+      supports_streaming: true,
+    });
+  } catch (err) {
+    await (ctx as any).reply(
+      "❌ فشل التحميل. تأكد أن الرابط صحيح وحاول مرة أخرى.",
+    );
+  }
 }
